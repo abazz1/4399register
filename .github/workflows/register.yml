@@ -1,0 +1,68 @@
+name: 4399 Auto Register
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: '运行时长(秒), 0=无限(最长6小时)'
+        required: false
+        default: '3600'
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Restore data files from cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            4399.txt
+            used_sfz.txt
+          key: register-data-${{ github.ref }}
+          restore-keys: |
+            register-data-
+
+      - name: Setup sfz.txt from secret
+        env:
+          SFZ_DATA: ${{ secrets.SFZ_DATA }}
+        run: |
+          if [ -n "$SFZ_DATA" ]; then
+            echo "$SFZ_DATA" | base64 -d > sfz.txt
+            echo "sfz.txt 已从 secret 恢复"
+          else
+            echo "未配置 SFZ_DATA secret, 使用仓库中的 sfz.txt"
+          fi
+
+      - name: Run register script
+        run: |
+          DURATION="${{ github.event.inputs.duration || '3600' }}"
+          python auto_register_4399.py --duration "$DURATION"
+        continue-on-error: true
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: register-results-${{ github.run_number }}
+          path: |
+            4399.txt
+            used_sfz.txt
+            register.log
+          retention-days: 30
