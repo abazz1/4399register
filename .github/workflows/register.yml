@@ -10,7 +10,7 @@ on:
       duration:
         description: '最大运行时长(秒), 0=无限(最长1.5小时)'
         required: false
-        default: '5400'
+        default: '300'
       workers:
         description: '并发线程数'
         required: false
@@ -141,7 +141,7 @@ jobs:
           PROXY_CHECK_THREADS: ${{ github.event.inputs.proxy_check_threads || '50' }}
         run: |
           COUNT="${{ github.event.inputs.count || '0' }}"
-          DURATION="${{ github.event.inputs.duration || '5400' }}"
+          DURATION="${{ github.event.inputs.duration || '300' }}"
           python auto_register_4399.py --count "$COUNT" --duration "$DURATION"
         continue-on-error: true
 
