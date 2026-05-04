@@ -8,9 +8,9 @@ on:
         required: false
         default: '0'
       duration:
-        description: '最大运行时长(秒), 0=无限(最长6小时)'
+        description: '最大运行时长(秒), 0=无限(最长3小时)'
         required: false
-        default: '3600'
+        default: '9000'
       workers:
         description: '并发线程数'
         required: false
@@ -73,12 +73,12 @@ on:
         default: '50'
 
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */3 * * *'
 
 jobs:
   register:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
@@ -141,7 +141,7 @@ jobs:
           PROXY_CHECK_THREADS: ${{ github.event.inputs.proxy_check_threads || '50' }}
         run: |
           COUNT="${{ github.event.inputs.count || '0' }}"
-          DURATION="${{ github.event.inputs.duration || '3600' }}"
+          DURATION="${{ github.event.inputs.duration || '9000' }}"
           python auto_register_4399.py --count "$COUNT" --duration "$DURATION"
         continue-on-error: true
 
