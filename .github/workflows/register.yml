@@ -34,7 +34,7 @@ on:
       use_custom_model:
         description: '使用自定义验证码模型 (true/false)'
         required: false
-        default: 'false'
+        default: 'true'
       onnx_use:
         description: '使用自定义onnx验证码模型 (true/false)'
         required: false
@@ -62,7 +62,7 @@ on:
       proxy_list_urls:
         description: '代理列表地址(逗号分隔多个源)'
         required: false
-        default: 'https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt,https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/http.txt,https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt,https://raw.githubusercontent.com/r00tee/Proxy-List/main/Https.txt'
+        default: 'https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt,https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/http.txt,https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt,https://raw.githubusercontent.com/r00tee/Proxy-List/main/Https.txt,https://raw.githubusercontent.com/ABoredCat/Free-Proxy/main/proxies/http.txt,https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt,https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt,https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt,https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt,https://proxy.scdn.io/text.php'
       max_per_ip:
         description: '单IP最大注册数(超限自动换IP)'
         required: false
@@ -70,7 +70,15 @@ on:
       proxy_check_threads:
         description: '代理验证并发线程数'
         required: false
-        default: '50'
+        default: '100'
+      proxy_check_timeout:
+        description: '代理验证超时(秒)'
+        required: false
+        default: '2'
+      proxy_warmup:
+        description: '启动前等待就绪代理数'
+        required: false
+        default: '20'
 
   schedule:
     - cron: '0 */4 * * *'
@@ -95,10 +103,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install onnxruntime
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
-          if [ "${{ github.event.inputs.use_custom_model || 'true' }}" = "true" ]; then
-            pip install torch --index-url https://download.pytorch.org/whl/cpu
-          fi
 
       - name: Restore data files from cache
         uses: actions/cache@v4
@@ -136,9 +142,11 @@ jobs:
           MIN_INTERVAL: ${{ github.event.inputs.min_interval || '1' }}
           MAX_INTERVAL: ${{ github.event.inputs.max_interval || '3' }}
           AUTO_LOGIN: ${{ github.event.inputs.auto_login || 'true' }}
-          PROXY_LIST_URLS: ${{ github.event.inputs.proxy_list_urls || 'https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt,https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/http.txt,https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt,https://raw.githubusercontent.com/r00tee/Proxy-List/main/Https.txt' }}
+          PROXY_LIST_URLS: ${{ github.event.inputs.proxy_list_urls || 'https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt,https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/http.txt,https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt,https://raw.githubusercontent.com/r00tee/Proxy-List/main/Https.txt,https://raw.githubusercontent.com/ABoredCat/Free-Proxy/main/proxies/http.txt,https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt,https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt,https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt,https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt,https://proxy.scdn.io/text.php' }}
           MAX_PER_IP: ${{ github.event.inputs.max_per_ip || '15' }}
-          PROXY_CHECK_THREADS: ${{ github.event.inputs.proxy_check_threads || '50' }}
+          PROXY_CHECK_THREADS: ${{ github.event.inputs.proxy_check_threads || '100' }}
+          PROXY_CHECK_TIMEOUT: ${{ github.event.inputs.proxy_check_timeout || '2' }}
+          PROXY_WARMUP: ${{ github.event.inputs.proxy_warmup || '20' }}
         run: |
           COUNT="${{ github.event.inputs.count || '0' }}"
           DURATION="${{ github.event.inputs.duration || '5400' }}"

@@ -17,7 +17,7 @@ def check(proxy):
         )
         if resp.status_code == 200:
             return proxy
-    except:
+    except Exception:
         pass
     return None
 
