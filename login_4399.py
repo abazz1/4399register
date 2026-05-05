@@ -1,4 +1,6 @@
 import json
+import time
+import random
 import logging
 import requests
 import ddddocr
@@ -26,16 +28,30 @@ def recognize_captcha_login(img_bytes, ocr_engine, use_custom_model, max_retries
         return None
 
 
-def check_verify_code(username, proxies, headers):
+def _request_with_retry(session, method, url, max_retries=3, **kwargs):
+    """带指数退避重试的请求"""
+    for attempt in range(max_retries):
+        try:
+            return session.request(method, url, timeout=15, **kwargs)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            if attempt == max_retries - 1:
+                raise
+            backoff = (2 ** attempt) + random.uniform(0, 0.5)
+            log.info(f'登录请求重试({attempt+1}/{max_retries}), {backoff:.1f}s: {e}')
+            time.sleep(backoff)
+
+
+def check_verify_code(session, username, proxies, headers):
     url = f"http://ptlogin.4399.com/ptlogin/verify.do?username={username}&appId=kid_wdsj&t={generate_uuid()}&inputWidth=iptw2&v=1"
-    resp = requests.get(url, cookies={"USESSIONID": generate_uuid()}, proxies=proxies, headers=headers, timeout=10)
+    resp = _request_with_retry(session, 'GET', url, proxies=proxies, headers=headers)
     match = search(r"/ptlogin/captcha\.do\?captchaId=[\w\d]+", resp.text)
     if match:
         return match.group(0).split("=")[1], f"http://ptlogin.4399.com{match.group(0)}"
     return "", ""
 
 
-def login(username, password, proxies, headers, ocr_engine, use_custom_model, verifycode="", verifysession=""):
+def login(session, username, password, proxies, headers, verifycode="", verifysession=""):
     login_url = "http://ptlogin.4399.com/ptlogin/login.do?v=1"
     if verifycode:
         payload = {
@@ -51,9 +67,8 @@ def login(username, password, proxies, headers, ocr_engine, use_custom_model, ve
             'password': password, 'username': username
         }
 
-    resp = requests.post(login_url,
-                         cookies={"ptusertype": "kid_wdsj.4399_login", "USESSIONID": generate_uuid()},
-                         data=payload, proxies=proxies, headers=headers, timeout=15)
+    resp = _request_with_retry(session, 'POST', login_url,
+                               data=payload, proxies=proxies, headers=headers)
 
     if resp.status_code != 200:
         raise Exception(f"登录失败 HTTP {resp.status_code}")
@@ -69,14 +84,16 @@ def login(username, password, proxies, headers, ocr_engine, use_custom_model, ve
         f"&onLineStart=false&show=1&isCrossDomain=1"
         f"&retUrl=http%253A%252F%252Fptlogin.4399.com%252Fresource%252Fucenter.html"
     )
-    check_resp = requests.post(check_url, cookies=cookies, proxies=proxies, headers=headers, timeout=15)
+    check_resp = _request_with_retry(session, 'POST', check_url,
+                                     proxies=proxies, headers=headers)
     if check_resp.status_code != 200:
         raise Exception(f"校验实名失败 HTTP {check_resp.status_code}")
 
-    user_info = requests.get(
+    user_info = _request_with_retry(
+        session, 'GET',
         "https://microgame.5054399.net/v2/service/sdk/info?callback=",
         params={'queryStr': check_resp.url.split('?')[1].strip()},
-        proxies=proxies, headers=headers, timeout=15
+        proxies=proxies, headers=headers
     ).json()
 
     if not user_info.get('data'):
@@ -86,36 +103,43 @@ def login(username, password, proxies, headers, ocr_engine, use_custom_model, ve
 
 
 def do_login(username, password, proxies, headers, ocr_engine, use_custom_model):
-    session_id, captcha_url = check_verify_code(username, proxies, headers)
-    captcha = ""
-    if captcha_url:
-        try:
-            img = requests.get(captcha_url, proxies=proxies, headers=headers, timeout=10).content
-            captcha = recognize_captcha_login(img, ocr_engine, use_custom_model)
-            if not captcha:
+    session = requests.Session()
+    session.cookies.set("USESSIONID", generate_uuid())
+    session.cookies.set("ptusertype", "kid_wdsj.4399_login")
+    try:
+        session_id, captcha_url = check_verify_code(session, username, proxies, headers)
+        captcha = ""
+        if captcha_url:
+            try:
+                img = _request_with_retry(session, 'GET', captcha_url,
+                                          proxies=proxies, headers=headers).content
+                captcha = recognize_captcha_login(img, ocr_engine, use_custom_model)
+                if not captcha:
+                    return None
+            except Exception as e:
+                log.warning(f'登录验证码获取失败: {e}')
                 return None
-        except Exception as e:
-            log.warning(f'登录验证码获取失败: {e}')
-            return None
 
-    user_data = login(username, password, proxies, headers, ocr_engine, use_custom_model, captcha, session_id)
-    sauth_data = {
-        "gameid": "x19",
-        "login_channel": "4399pc",
-        "app_channel": "4399pc",
-        "platform": "pc",
-        "sdkuid": user_data["uid"],
-        "sessionid": user_data["token"],
-        "sdk_version": "1.0.0",
-        "udid": generate_uuid(),
-        "deviceid": generate_uuid(),
-        "aim_info": json.dumps({"aim": "127.0.0.1", "country": "CN", "tz": "0800", "tzid": ""}),
-        "client_login_sn": generate_uuid(),
-        "gas_token": "",
-        "source_platform": "pc",
-        "ip": "127.0.0.1",
-        "userid": user_data["username"],
-        "realname": json.dumps({"realname_type": "0"}),
-        "timestamp": user_data["time"]
-    }
-    return json.dumps({"sauth_json": json.dumps(sauth_data)}).replace(" ", "")
+        user_data = login(session, username, password, proxies, headers, captcha, session_id)
+        sauth_data = {
+            "gameid": "x19",
+            "login_channel": "4399pc",
+            "app_channel": "4399pc",
+            "platform": "pc",
+            "sdkuid": user_data["uid"],
+            "sessionid": user_data["token"],
+            "sdk_version": "1.0.0",
+            "udid": generate_uuid(),
+            "deviceid": generate_uuid(),
+            "aim_info": json.dumps({"aim": "127.0.0.1", "country": "CN", "tz": "0800", "tzid": ""}),
+            "client_login_sn": generate_uuid(),
+            "gas_token": "",
+            "source_platform": "pc",
+            "ip": "127.0.0.1",
+            "userid": user_data["username"],
+            "realname": json.dumps({"realname_type": "0"}),
+            "timestamp": user_data["time"]
+        }
+        return json.dumps({"sauth_json": json.dumps(sauth_data)}).replace(" ", "")
+    finally:
+        session.close()

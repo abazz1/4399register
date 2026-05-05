@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import logging
 import requests
@@ -579,45 +580,46 @@ def run_once(valid_sfz, used_count, proxy_manager):
         return 'error'
 
 
-def batch_login(proxy_manager, accounts):
-    """注册完成后批量登录获取sauth"""
+def _do_login_one(username, password):
+    """单个登录任务（供线程池调用）"""
+    try:
+        sauth = do_login(username, password, {}, CONFIG['headers'],
+                         ocr_engine, CONFIG['use_custom_model'])
+        if sauth:
+            with file_lock:
+                with open(CONFIG['sauth_file'], 'a', encoding='utf-8') as sf:
+                    sf.write(json.dumps({
+                        'username': username, 'password': password,
+                        'sauth': sauth
+                    }, ensure_ascii=False) + '\n')
+            return 'success'
+        return 'fail'
+    except Exception as e:
+        log.warning(f'[!] 登录异常 {username}: {e}')
+        return 'error'
+
+
+def batch_login(accounts):
+    """注册完成后多线程批量登录获取sauth（直连，不用代理）"""
     if not accounts:
         log.info('无账号需要登录')
         return
 
-    log.info(f'=== 开始批量登录 ({len(accounts)} 个账号) ===')
-    import json as _json
+    login_workers = min(20, len(accounts))
+    log.info(f'=== 开始批量登录 ({len(accounts)} 个账号, {login_workers} 线程, 直连) ===')
     login_ok = 0
     login_fail = 0
 
-    for username, password in accounts:
-        proxies = proxy_manager.acquire()
-        if proxies is None:
-            log.warning(f'登录 {username}: 无可用代理, 跳过')
-            login_fail += 1
-            continue
-        try:
-            sauth = do_login(username, password, proxies, CONFIG['headers'],
-                             ocr_engine, CONFIG['use_custom_model'])
-            if sauth:
-                with file_lock:
-                    with open(CONFIG['sauth_file'], 'a', encoding='utf-8') as sf:
-                        sf.write(_json.dumps({
-                            'username': username, 'password': password,
-                            'sauth': sauth
-                        }, ensure_ascii=False) + '\n')
-                proxy_manager.release(proxies, success=True)
+    with ThreadPoolExecutor(max_workers=login_workers) as pool:
+        futures = {pool.submit(_do_login_one, u, p): u for u, p in accounts}
+        for f in as_completed(futures):
+            username = futures[f]
+            result = f.result()
+            if result == 'success':
                 login_ok += 1
                 log.info(f'[+] 登录成功 {username} ({login_ok}/{len(accounts)})')
             else:
-                proxy_manager.release(proxies)
                 login_fail += 1
-                log.warning(f'[!] 登录失败 {username}')
-        except Exception as e:
-            proxy_manager.release(proxies)
-            login_fail += 1
-            log.warning(f'[!] 登录异常 {username}: {e}')
-        time.sleep(random.uniform(0.5, 1.5))
 
     log.info(f'=== 批量登录完成: 成功 {login_ok}, 失败 {login_fail} ===')
 
@@ -713,6 +715,6 @@ if __name__ == "__main__":
     log.info(f'注册阶段结束, 总成功注册: {success_counter} 个')
 
     if CONFIG['auto_login'] and registered_accounts:
-        batch_login(proxy_manager, registered_accounts)
+        batch_login(registered_accounts)
 
     log.info(f'全部完成, 注册 {success_counter} 个, 登录 {len(registered_accounts)} 个')
