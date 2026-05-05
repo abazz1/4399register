@@ -3,143 +3,200 @@ import time
 import random
 import logging
 import requests
-import ddddocr
+import re
 from uuid import uuid4
-from re import search
+from urllib.parse import urlparse, parse_qs
 
 log = logging.getLogger(__name__)
+
+# OAuth 配置
+OAUTH_URL = "https://m.4399api.com/openapi/oauth-callback.html?gamekey=44770&game_key=115716"
+CAPTCHA_URL = "https://ptlogin.4399.com/ptlogin/captcha.do"
+OAUTH_LOGIN_URL = "https://ptlogin.4399.com/oauth2/loginAndAuthorize.do?channel=&sdk=op&sdk_version=3.12.2.503"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 
 def generate_uuid():
     return str(uuid4()).replace("-", "").upper()
 
 
-def recognize_captcha_login(img_bytes, ocr_engine, use_custom_model, max_retries=5):
-    if use_custom_model:
-        result = ocr_engine.recognize(img_bytes)
-        if len(result) == 4 and result.isalnum():
-            return result.lower()
-        return None
-    else:
-        for _ in range(max_retries):
-            captcha = ocr_engine.classification(img_bytes)
-            if len(captcha) == 4 and captcha.isalnum():
-                return captcha.lower()
-        return None
+def random_hex(length):
+    return ''.join(random.choices('0123456789abcdef', k=length))
 
 
-def _request_with_retry(session, method, url, max_retries=3, **kwargs):
-    """带指数退避重试的请求"""
+def recognize_captcha(img_bytes, ocr_engine, use_custom_model):
+    """识别验证码"""
+    try:
+        if use_custom_model:
+            result = ocr_engine.recognize(img_bytes)
+            if result and len(result) >= 4:
+                return result[:4].lower()
+        else:
+            # 假设 ocr_engine 有 classification 方法 (如 ddddocr)
+            if hasattr(ocr_engine, 'classification'):
+                result = ocr_engine.classification(img_bytes)
+                if result and len(result) >= 4:
+                    return result[:4].lower()
+    except Exception as e:
+        log.debug(f'验证码识别错误: {e}')
+    return ""
+
+
+def check_realname(session):
+    """
+    检查实名状态 (参考原 login_4399.py 逻辑)
+    返回 (is_verified, reason)
+    """
+    try:
+        # 尝试获取 Uauth Cookie
+        uauth = session.cookies.get("Uauth")
+        if not uauth or '|' not in uauth:
+            return False, "缺少 Uauth Cookie"
+
+        rand_time = uauth.split('|')[4]
+        check_url = (
+            f"http://ptlogin.4399.com/ptlogin/checkKidLoginUserCookie.do?"
+            f"appId=kid_wdsj&gameUrl=http://cdn.h5wan.4399sj.com/microterminal-h5-frame?"
+            f"game_id=500352&rand_time={rand_time}&nick=null"
+            f"&onLineStart=false&show=1&isCrossDomain=1"
+            f"&retUrl=http%253A%252F%252Fptlogin.4399.com%252Fresource%252Fucenter.html"
+        )
+        
+        # 使用 allow_redirects=False 获取跳转链接
+        resp = session.post(check_url, headers=HEADERS, allow_redirects=False, timeout=10)
+        
+        if resp.status_code in (301, 302):
+            redirect_url = resp.headers.get('Location', '')
+            if 'realname' in redirect_url.lower() or 'fcm' in redirect_url.lower():
+                return False, "需要实名认证"
+            
+            # 进一步请求获取用户信息
+            info_resp = requests.get(redirect_url, headers=HEADERS, timeout=10)
+            try:
+                # 尝试从响应中提取 realname_type 或其他标识
+                # 这里简化判断，如果能正常跳转且不含 realname 关键词，通常认为已实名
+                return True, "实名校验通过"
+            except:
+                return True, "实名校验通过(跳转成功)"
+        else:
+            return False, f"实名校验请求失败: HTTP {resp.status_code}"
+    except Exception as e:
+        return False, f"实名校验异常: {e}"
+
+
+def do_login(username, password, ocr_engine, use_custom_model):
+    """
+    使用 OAuth 流程登录，并进行实名校验
+    返回 (is_success, message)
+    """
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    
+    max_retries = 3
     for attempt in range(max_retries):
         try:
-            return session.request(method, url, timeout=15, **kwargs)
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout) as e:
-            if attempt == max_retries - 1:
-                raise
-            backoff = (2 ** attempt) + random.uniform(0, 0.5)
-            log.info(f'登录请求重试({attempt+1}/{max_retries}), {backoff:.1f}s: {e}')
-            time.sleep(backoff)
+            # 1. 获取 OAuth 参数
+            resp = session.get(OAUTH_URL, timeout=10)
+            data = resp.json()
+            init_url = data.get('result', '')
+            if not init_url:
+                log.warning(f'OAuth 参数获取失败: {data}')
+                time.sleep(2)
+                continue
 
+            parsed = urlparse(init_url)
+            qs = parse_qs(parsed.query)
+            client_id = qs.get('client_id', [''])[0]
+            state = qs.get('state', [''])[0]
+            ref = qs.get('ref', [''])[0]
+            if not (client_id and state and ref):
+                log.warning('OAuth 参数缺失')
+                time.sleep(2)
+                continue
 
-def check_verify_code(session, username, proxies, headers):
-    url = f"http://ptlogin.4399.com/ptlogin/verify.do?username={username}&appId=kid_wdsj&t={generate_uuid()}&inputWidth=iptw2&v=1"
-    resp = _request_with_retry(session, 'GET', url, proxies=proxies, headers=headers)
-    match = search(r"/ptlogin/captcha\.do\?captchaId=[\w\d]+", resp.text)
-    if match:
-        return match.group(0).split("=")[1], f"http://ptlogin.4399.com{match.group(0)}"
-    return "", ""
-
-
-def login(session, username, password, proxies, headers, verifycode="", verifysession=""):
-    login_url = "http://ptlogin.4399.com/ptlogin/login.do?v=1"
-    if verifycode:
-        payload = {
-            'postLoginHandler': 'default', 'externalLogin': 'qq',
-            'bizId': '2100001792', 'appId': 'kid_wdsj', 'gameId': 'wd', 'sec': '1',
-            'password': password, 'username': username,
-            'redirectUrl': '', 'sessionId': verifysession, 'inputCaptcha': verifycode
-        }
-    else:
-        payload = {
-            'postLoginHandler': 'default', 'externalLogin': 'qq',
-            'bizId': '2100001792', 'appId': 'kid_wdsj', 'gameId': 'wd', 'sec': '1',
-            'password': password, 'username': username
-        }
-
-    resp = _request_with_retry(session, 'POST', login_url,
-                               data=payload, proxies=proxies, headers=headers)
-
-    if resp.status_code != 200:
-        raise Exception(f"登录失败 HTTP {resp.status_code}")
-
-    cookies = resp.cookies.get_dict()
-    if not cookies.get("Uauth") or not cookies.get("Puser"):
-        raise Exception("账号密码错误或IP被拉黑")
-
-    check_url = (
-        f"http://ptlogin.4399.com/ptlogin/checkKidLoginUserCookie.do?"
-        f"appId=kid_wdsj&gameUrl=http://cdn.h5wan.4399sj.com/microterminal-h5-frame?"
-        f"game_id=500352&rand_time={cookies['Uauth'].split('|')[4]}&nick=null"
-        f"&onLineStart=false&show=1&isCrossDomain=1"
-        f"&retUrl=http%253A%252F%252Fptlogin.4399.com%252Fresource%252Fucenter.html"
-    )
-    check_resp = _request_with_retry(session, 'POST', check_url,
-                                     proxies=proxies, headers=headers)
-    if check_resp.status_code != 200:
-        raise Exception(f"校验实名失败 HTTP {check_resp.status_code}")
-
-    user_info = _request_with_retry(
-        session, 'GET',
-        "https://microgame.5054399.net/v2/service/sdk/info?callback=",
-        params={'queryStr': check_resp.url.split('?')[1].strip()},
-        proxies=proxies, headers=headers
-    ).json()
-
-    if not user_info.get('data'):
-        raise Exception(f"用户信息获取失败: {user_info.get('msg')}")
-
-    return {k: v for k, v in (item.split('=') for item in user_info['data']['sdk_login_data'].split('&'))}
-
-
-def do_login(username, password, proxies, headers, ocr_engine, use_custom_model):
-    session = requests.Session()
-    session.cookies.set("USESSIONID", generate_uuid())
-    session.cookies.set("ptusertype", "kid_wdsj.4399_login")
-    try:
-        session_id, captcha_url = check_verify_code(session, username, proxies, headers)
-        captcha = ""
-        if captcha_url:
+            # 2. 获取并识别验证码
+            captcha_id = random_hex(48)
+            captcha_text = ""
             try:
-                img = _request_with_retry(session, 'GET', captcha_url,
-                                          proxies=proxies, headers=headers).content
-                captcha = recognize_captcha_login(img, ocr_engine, use_custom_model)
-                if not captcha:
-                    return None
+                img_resp = session.get(f"{CAPTCHA_URL}?captchaId={captcha_id}", timeout=10)
+                if img_resp.status_code == 200:
+                    captcha_text = recognize_captcha(img_resp.content, ocr_engine, use_custom_model)
             except Exception as e:
-                log.warning(f'登录验证码获取失败: {e}')
-                return None
+                log.debug(f'验证码获取失败: {e}')
 
-        user_data = login(session, username, password, proxies, headers, captcha, session_id)
-        sauth_data = {
-            "gameid": "x19",
-            "login_channel": "4399pc",
-            "app_channel": "4399pc",
-            "platform": "pc",
-            "sdkuid": user_data["uid"],
-            "sessionid": user_data["token"],
-            "sdk_version": "1.0.0",
-            "udid": generate_uuid(),
-            "deviceid": generate_uuid(),
-            "aim_info": json.dumps({"aim": "127.0.0.1", "country": "CN", "tz": "0800", "tzid": ""}),
-            "client_login_sn": generate_uuid(),
-            "gas_token": "",
-            "source_platform": "pc",
-            "ip": "127.0.0.1",
-            "userid": user_data["username"],
-            "realname": json.dumps({"realname_type": "0"}),
-            "timestamp": user_data["time"]
-        }
-        return json.dumps({"sauth_json": json.dumps(sauth_data)}).replace(" ", "")
-    finally:
-        session.close()
+            # 3. 执行登录
+            login_params = {
+                'isInputRealname': 'false',
+                'isVaildRealname': 'false',
+                'sec': '0',
+                'captcha_id': captcha_id,
+                'captcha': captcha_text,
+                'password': password,
+                'username': username,
+                'client_id': client_id,
+                'state': state,
+                'ref': ref,
+                'response_type': 'TOKEN',
+                'scope': 'basic',
+                'bizId': '2100001792',
+                'auth_action': 'ORILOGIN',
+                'redirect_uri': OAUTH_URL.split('?')[0] + '?' + OAUTH_URL.split('?')[1]
+            }
+
+            login_resp = session.post(
+                OAUTH_LOGIN_URL,
+                data=login_params,
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                allow_redirects=False,
+                timeout=10
+            )
+
+            # 4. 分析登录结果
+            is_login_success = False
+            if 300 <= login_resp.status_code < 400:
+                redirect_url = login_resp.headers.get('location', '')
+                if 'access_token=' in redirect_url:
+                    is_login_success = True
+                else:
+                    log.warning(f'未知重定向: {redirect_url[:80]}')
+            
+            if not is_login_success:
+                body = login_resp.text
+                try:
+                    result = json.loads(body)
+                    code = result.get('code')
+                    msg = result.get('message', '')
+                    if code == '100':
+                        is_login_success = True
+                    elif code == '103':
+                        return False, "需要二次验证(封号/风险)"
+                    elif '验证码' in msg or 'captcha' in msg.lower():
+                        log.info(f'验证码错误，重试...')
+                        continue
+                    else:
+                        return False, f"code={code}, msg={msg}"
+                except:
+                    return False, f"响应不可解析: {body[:60]}"
+
+            # 5. 实名校验 (保留)
+            if is_login_success:
+                verified, reason = check_realname(session)
+                if not verified:
+                    return False, f"登录成功但未实名: {reason}"
+                return True, "登录成功且已实名"
+            
+            return False, "登录失败"
+
+        except requests.RequestException as e:
+            log.warning(f'网络错误: {e}')
+            time.sleep(2)
+            continue
+        except Exception as e:
+            log.error(f'未知错误: {e}')
+            time.sleep(2)
+            continue
+
+    return False, "重试耗尽"

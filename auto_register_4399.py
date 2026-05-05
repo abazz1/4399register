@@ -73,14 +73,13 @@ CONFIG = {
         'Referer': 'https://ptlogin.4399.com/',
     },
 
-    # 登录获取 sauth
+    # 登录
     'auto_login':   env('AUTO_LOGIN', True),
 
     # 文件
     'sfz_file':      env('SFZ_FILE', 'sfz.txt'),
     'used_sfz_file': env('USED_SFZ_FILE', 'used_sfz.txt'),
     'output_file':   env('OUTPUT_FILE', '4399.txt'),
-    'sauth_file':    env('SAUTH_FILE', 'sauth.json'),
     'log_file':      env('LOG_FILE', 'register.log'),
 
     # 并发
@@ -622,24 +621,20 @@ def run_once(valid_sfz, used_count, proxy_manager):
 def _do_login_one(username, password):
     """单个登录任务（供线程池调用）"""
     try:
-        sauth = do_login(username, password, {}, CONFIG['headers'],
-                         ocr_engine, CONFIG['use_custom_model'])
-        if sauth:
-            with file_lock:
-                with open(CONFIG['sauth_file'], 'a', encoding='utf-8') as sf:
-                    sf.write(json.dumps({
-                        'username': username, 'password': password,
-                        'sauth': sauth
-                    }, ensure_ascii=False) + '\n')
+        success, msg = do_login(username, password, ocr_engine, CONFIG['use_custom_model'])
+        if success:
+            log.info(f'[+] 登录成功 {username} ({msg})')
             return 'success'
-        return 'fail'
+        else:
+            log.warning(f'[!] 登录失败 {username}: {msg}')
+            return 'fail'
     except Exception as e:
         log.warning(f'[!] 登录异常 {username}: {e}')
         return 'error'
 
 
 def batch_login(accounts):
-    """注册完成后多线程批量登录获取sauth（直连，不用代理）"""
+    """注册完成后多线程批量登录验证账号有效性（直连，不用代理）"""
     if not accounts:
         log.info('无账号需要登录')
         return
