@@ -12,17 +12,18 @@ def generate_uuid():
     return str(uuid4()).replace("-", "").upper()
 
 
-def recognize_captcha_login(img_bytes, ocr_engine, use_custom_model):
+def recognize_captcha_login(img_bytes, ocr_engine, use_custom_model, max_retries=5):
     if use_custom_model:
         result = ocr_engine.recognize(img_bytes)
         if len(result) == 4 and result.isalnum():
             return result.lower()
         return None
     else:
-        while True:
+        for _ in range(max_retries):
             captcha = ocr_engine.classification(img_bytes)
             if len(captcha) == 4 and captcha.isalnum():
                 return captcha.lower()
+        return None
 
 
 def check_verify_code(username, proxies, headers):

@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 import requests
@@ -8,7 +9,7 @@ import urllib3
 import threading
 from io import BytesIO
 from PIL import Image
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from queue import Queue
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -36,12 +37,18 @@ CONFIG = {
         'https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/http.txt,'
         'https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt,'
         'https://raw.githubusercontent.com/r00tee/Proxy-List/main/Https.txt,'
-        'https://raw.githubusercontent.com/ABoredCat/Free-Proxy/main/proxies/http.txt'
+        'https://raw.githubusercontent.com/ABoredCat/Free-Proxy/main/proxies/http.txt,'
+        'https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt,'
+        'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt,'
+        'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt,'
+        'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt,'
+        'https://proxy.scdn.io/text.php'
     ),
     'max_per_ip':         env('MAX_PER_IP', 15),
-    'proxy_check_threads': env('PROXY_CHECK_THREADS', 50),
-    'proxy_check_timeout': env('PROXY_CHECK_TIMEOUT', 5),
-    'proxy_check_url':    env('PROXY_CHECK_URL', 'http://httpbin.org/ip'),
+    'proxy_check_threads': env('PROXY_CHECK_THREADS', 100),
+    'proxy_check_timeout': env('PROXY_CHECK_TIMEOUT', 2),
+    'proxy_warmup':        env('PROXY_WARMUP', 20),  # 启动前等待就绪代理数
+    'proxy_check_url':    env('PROXY_CHECK_URL', 'https://ptlogin.4399.com/ptlogin/captcha.do?captchaId=test'),
 
     # 验证码识别
     'use_custom_model': env('USE_CUSTOM_MODEL', True),
@@ -74,7 +81,7 @@ CONFIG = {
     'log_file':      env('LOG_FILE', 'register.log'),
 
     # 并发
-    'workers':      env('WORKERS', 150),
+    'workers':      env('WORKERS', 15),
     'min_interval': env('MIN_INTERVAL', 2),
     'max_interval': env('MAX_INTERVAL', 3),
 }
@@ -151,6 +158,7 @@ class ProxyManager:
         self._raw = []            # 待验证的原始代理
         self._check_threads = CONFIG['proxy_check_threads']
         self._stop_event = threading.Event()
+        self._refilling = False
 
     def load_proxies(self):
         file_proxies = load_lines(CONFIG['proxy_file'])
@@ -158,6 +166,7 @@ class ProxyManager:
             self._raw.extend(file_proxies)
             log.info(f'从文件加载 {len(file_proxies)} 个代理')
         self.fetch_from_list()
+        self.fetch_from_scrapers()
         self._start_checkers()
 
     def fetch_from_list(self):
@@ -180,6 +189,38 @@ class ProxyManager:
                 log.warning(f'  x {url.split("/")[-1]}: {e}')
         log.info(f'本次拉取 {total_added} 个代理, 待验证队列 {len(self._raw)} 个')
 
+    def fetch_from_scrapers(self):
+        """从需要解析HTML的代理站抓取"""
+        existing = set(self._raw) | set(self._ready) | self._bad | set(self._in_use.keys())
+        total_added = 0
+        ip_port_re = re.compile(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})[^\d](\d{2,5})')
+
+        def _scrape(name, url, headers=None):
+            nonlocal total_added
+            try:
+                resp = requests.get(url, headers=headers or {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }, timeout=10, verify=False)
+                if resp.status_code != 200:
+                    log.warning(f'  x {name}: HTTP {resp.status_code}')
+                    return
+                proxies = [f'{m[0]}:{m[1]}' for m in ip_port_re.findall(resp.text)
+                           if 1 <= int(m[1]) <= 65535 and m[0] not in ('0.0.0.0', '127.0.0.1')]
+                added = [p for p in proxies if p not in existing]
+                self._raw.extend(added)
+                existing.update(added)
+                total_added += len(added)
+                log.info(f'  + {name}: {len(added)} 个待验证')
+            except Exception as e:
+                log.warning(f'  x {name}: {e}')
+
+        # 快代理 (kuaidaili.com)
+        for page in range(1, 4):
+            _scrape(f'kuaidaili/p{page}', f'https://www.kuaidaili.com/free/inha/{page}/')
+            time.sleep(0.5)
+
+        log.info(f'爬虫抓取完成, 新增 {total_added} 个代理')
+
     def _check_one(self, proxy):
         proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
         try:
@@ -191,6 +232,7 @@ class ProxyManager:
 
     def _checker_worker(self):
         """后台验证线程：持续从 _raw 取代理验证，放入 _ready 或 _bad"""
+        checked_count = 0
         while not self._stop_event.is_set():
             proxy = None
             with self._lock:
@@ -201,14 +243,13 @@ class ProxyManager:
                 continue
             ok = self._check_one(proxy)
             with self._lock:
-                if ok and proxy not in self._bad:
+                if ok and proxy not in self._bad and proxy not in self._ready and proxy not in self._in_use:
                     self._ready.append(proxy)
                 else:
                     self._bad.add(proxy)
-                # 每验证50个打印一次进度
-                total_checked = len(self._ready) + len(self._bad)
-                if total_checked % 50 == 0:
-                    log.info(f'验证进度: 已检查 {total_checked}, 就绪 {len(self._ready)}, 失效 {len(self._bad)}')
+                checked_count += 1
+                if checked_count % 50 == 0:
+                    log.info(f'验证进度: 已检查 {checked_count}, 就绪 {len(self._ready)}, 失效 {len(self._bad)}')
 
     def _start_checkers(self):
         """启动后台验证线程（守护线程，边验证边注册）"""
@@ -221,16 +262,24 @@ class ProxyManager:
             t.start()
 
     def _refill(self):
-        """补充代理池"""
-        before = len(self._raw)
-        self.fetch_from_list()
-        added = len(self._raw) - before
-        if added > 0:
-            n = min(self._check_threads, added)
-            log.info(f'补充启动 {n} 个验证线程')
-            for _ in range(n):
-                t = threading.Thread(target=self._checker_worker, daemon=True)
-                t.start()
+        """补充代理池（带锁防并发重复填充）"""
+        with self._lock:
+            if self._refilling:
+                return
+            self._refilling = True
+        try:
+            before = len(self._raw)
+            self.fetch_from_list()
+            added = len(self._raw) - before
+            if added > 0:
+                n = min(self._check_threads, added)
+                log.info(f'补充启动 {n} 个验证线程')
+                for _ in range(n):
+                    t = threading.Thread(target=self._checker_worker, daemon=True)
+                    t.start()
+        finally:
+            with self._lock:
+                self._refilling = False
 
     def acquire(self):
         """获取一个独占代理（每个线程不同IP），边验证边获取"""
@@ -250,6 +299,16 @@ class ProxyManager:
                         self._in_use[proxy] = self._usage.get(proxy, 0)
                         return {'http': f'http://{proxy}', 'https': f'http://{proxy}',
                                 '_proxy': proxy}
+
+                # 所有就绪代理都达上限，重置 usage 让它们可复用
+                if self._ready and all(
+                    self._usage.get(p, 0) >= CONFIG['max_per_ip'] for p in self._ready
+                ):
+                    for p in self._ready:
+                        self._usage.pop(p, None)
+                    log.info(f'所有就绪代理已达上限, 已重置 {len(self._ready)} 个代理的使用计数')
+                    continue  # 立即重试，不等待
+
                 raw_left = len(self._raw)
                 ready_cnt = len(self._ready)
                 bad_cnt = len(self._bad)
@@ -262,7 +321,7 @@ class ProxyManager:
             time.sleep(0.5)
         with self._lock:
             log.warning(f'等待超时, 就绪{len(self._ready)} 失效{len(self._bad)}, 无可用代理')
-        return {}
+        return None
 
     def release(self, proxies, success=False):
         """释放代理回池"""
@@ -291,13 +350,13 @@ class ProxyManager:
             self._in_use.pop(proxy, None)
             cnt = self._fail_count.get(proxy, 0) + 1
             self._fail_count[proxy] = cnt
-            if cnt >= 10:
+            if cnt >= 3:
                 self._bad.add(proxy)
                 self._fail_count.pop(proxy, None)
                 log.warning(f'代理连续失败{cnt}次, 丢弃: {proxy}')
             else:
                 self._ready.append(proxy)
-                log.info(f'代理网络错误({cnt}/10), 放回重试: {proxy}')
+                log.info(f'代理网络错误({cnt}/3), 放回重试: {proxy}')
 
     def mark_bad(self, proxies):
         """代理被封/被限频，直接丢弃"""
@@ -390,20 +449,25 @@ success_lock = threading.Lock()
 registered_accounts = []  # 本次注册成功的账号 [(username, password), ...]
 
 
-def _try_register_once(username, password, realname, idcard, proxies, proxy_manager):
+_NET_ERRORS = (
+    requests.exceptions.ProxyError,
+    requests.exceptions.SSLError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
+
+def _try_register_once(username, password, realname, idcard, proxies, proxy_manager, session):
     """用一个代理尝试注册（含验证码重试），返回 (结果, 需要换代理)"""
     for attempt in range(CONFIG['max_captcha_retry'] + 1):
         sessionId = 'captchaReq' + ''.join(random.sample(ALPHABET, 19))
         try:
-            captcha_img = requests.get(
+            captcha_img = session.get(
                 url=CONFIG['captcha_url'].format(sessionId),
                 headers=CONFIG['headers'], proxies=proxies, timeout=10).content
-        except (requests.exceptions.ProxyError,
-                requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout):
+        except _NET_ERRORS:
             proxy_manager.soft_fail(proxies)
-            return 'net_error', True  # 换代理
+            return 'net_error', True
         yzm_data = recognize_captcha(captcha_img)
         if yzm_data is None:
             continue
@@ -424,14 +488,11 @@ def _try_register_once(username, password, realname, idcard, proxies, proxy_mana
             'realname': realname, 'idcard': idcard,
         }
         try:
-            html = requests.post(url=CONFIG['register_url'], data=post,
-                                 proxies=proxies, timeout=15, headers=CONFIG['headers']).text
-        except (requests.exceptions.ProxyError,
-                requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout):
+            html = session.post(url=CONFIG['register_url'], data=post,
+                                proxies=proxies, timeout=15, headers=CONFIG['headers']).text
+        except _NET_ERRORS:
             proxy_manager.soft_fail(proxies)
-            return 'net_error', True  # 换代理
+            return 'net_error', True
 
         code = match_error(html)
         if code == 'success':
@@ -440,57 +501,61 @@ def _try_register_once(username, password, realname, idcard, proxies, proxy_mana
             continue
         elif code in ('server_503', 'server_busy', 'rate_limit'):
             proxy_manager.mark_bad(proxies)
-            return code, True  # 换代理
+            return code, True
         elif code:
             return code, False
         else:
             return 'unknown', False
 
-    return 'captcha_exhausted', True  # 验证码全错，可能代理有问题
+    return 'captcha_exhausted', True
 
 
 def register_4399(username, password, valid_sfz, used_count, proxy_manager):
-    """注册一个账号，网络失败自动换代理重试"""
+    """注册一个账号，网络失败自动换代理重试（指数退避）"""
     with file_lock:
         sfz_line, realname, idcard = pick_sfz(valid_sfz, used_count)
     if not sfz_line:
         return 'no_sfz'
 
-    max_proxy_tries = 3  # 最多换3个代理
-    for proxy_try in range(max_proxy_tries):
-        proxies = proxy_manager.acquire()
-        if proxies is None:
-            return 'ip_limit'
-        if not proxies:
-            return 'no_proxy'
+    max_proxy_tries = 3
+    session = requests.Session()
+    try:
+        for proxy_try in range(max_proxy_tries):
+            proxies = proxy_manager.acquire()
+            if proxies is None:
+                return 'no_proxy'
 
-        result, need_switch = _try_register_once(
-            username, password, realname, idcard, proxies, proxy_manager)
+            result, need_switch = _try_register_once(
+                username, password, realname, idcard, proxies, proxy_manager, session)
 
-        if result == 'success':
-            proxy_manager.release(proxies, success=True)
-            with file_lock:
-                count = used_count.get(sfz_line, 0) + 1
-                used_count[sfz_line] = count
-                with open(CONFIG['output_file'], 'a', encoding='utf-8') as fh:
-                    fh.write(f'{username}----{password}\n')
-                with open(CONFIG['used_sfz_file'], 'a', encoding='utf-8') as fh2:
-                    fh2.write(f'{sfz_line}----{count}\n')
-                registered_accounts.append((username, password))
-            with success_lock:
-                global success_counter
-                success_counter += 1
-                cur = success_counter
-            log.info(f'[+] 注册成功 {username}----{password} (sfz {count}/{CONFIG["max_sfz_uses"]}) (总成功: {cur})')
-            return 'success'
+            if result == 'success':
+                proxy_manager.release(proxies, success=True)
+                with file_lock:
+                    count = used_count.get(sfz_line, 0) + 1
+                    used_count[sfz_line] = count
+                    with open(CONFIG['output_file'], 'a', encoding='utf-8') as fh:
+                        fh.write(f'{username}----{password}\n')
+                    with open(CONFIG['used_sfz_file'], 'a', encoding='utf-8') as fh2:
+                        fh2.write(f'{sfz_line}----{count}\n')
+                    registered_accounts.append((username, password))
+                with success_lock:
+                    global success_counter
+                    success_counter += 1
+                    cur = success_counter
+                log.info(f'[+] 注册成功 {username}----{password} (sfz {count}/{CONFIG["max_sfz_uses"]}) (总成功: {cur})')
+                return 'success'
 
-        if not need_switch:
-            proxy_manager.release(proxies)
-            return result
+            if not need_switch:
+                proxy_manager.release(proxies)
+                return result
 
-        # 需要换代理，继续循环
-        if proxy_try < max_proxy_tries - 1:
-            log.info(f'代理失败({result}), 换代理重试 {username} ({proxy_try+2}/{max_proxy_tries})')
+            # 指数退避: 1s, 2s, 4s (加 jitter 防止雷群效应)
+            if proxy_try < max_proxy_tries - 1:
+                backoff = (2 ** proxy_try) + random.uniform(0, 0.5)
+                log.info(f'代理失败({result}), {backoff:.1f}s 后换代理重试 {username} ({proxy_try+2}/{max_proxy_tries})')
+                time.sleep(backoff)
+    finally:
+        session.close()
 
     return result
 
@@ -520,7 +585,7 @@ def batch_login(proxy_manager, accounts):
 
     for username, password in accounts:
         proxies = proxy_manager.acquire()
-        if proxies is None or not proxies:
+        if proxies is None:
             log.warning(f'登录 {username}: 无可用代理, 跳过')
             login_fail += 1
             continue
@@ -560,14 +625,17 @@ if __name__ == "__main__":
     proxy_manager = ProxyManager()
     if CONFIG['use_proxy']:
         proxy_manager.load_proxies()
-        # 等待第一批代理验证完成
-        log.info('等待代理池就绪...')
-        for _ in range(60):
+        warmup = CONFIG['proxy_warmup']
+        log.info(f'预热中, 等待 {warmup} 个代理就绪...')
+        for i in range(120):
             with proxy_manager._lock:
                 ready = len(proxy_manager._ready)
                 raw = len(proxy_manager._raw)
-            if ready >= 5 or raw == 0:
+                bad = len(proxy_manager._bad)
+            if ready >= warmup or raw == 0:
                 break
+            if i % 10 == 0 and i > 0:
+                log.info(f'预热进度: 就绪 {ready}/{warmup}, 待验证 {raw}, 失效 {bad}')
             time.sleep(1)
         with proxy_manager._lock:
             ready = len(proxy_manager._ready)
@@ -594,23 +662,23 @@ if __name__ == "__main__":
     deadline = time.time() + args.duration if args.duration > 0 else None
 
     with ThreadPoolExecutor(max_workers=CONFIG['workers']) as pool:
+        pending = set()
         try:
             while True:
                 if deadline and time.time() >= deadline:
                     log.info(f'已达到运行时长 {args.duration} 秒, 停止')
                     break
-
                 if args.count > 0 and success_counter >= args.count:
                     log.info(f'已达到目标数量 {args.count} 个, 停止')
                     break
 
-                futures = []
-                for _ in range(CONFIG['workers']):
-                    f = pool.submit(run_once, valid_sfz, used_count, proxy_manager)
-                    futures.append(f)
-                    time.sleep(random.uniform(0.2, 0.5))
+                # 持续填满线程池，不等待整批完成
+                while len(pending) < CONFIG['workers']:
+                    pending.add(pool.submit(run_once, valid_sfz, used_count, proxy_manager))
 
-                for f in as_completed(futures):
+                # 等任意一个完成，处理结果，立即补充新任务
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for f in done:
                     result = f.result()
                     if result == 'ip_limit':
                         log.warning('所有IP已达注册上限, 停止运行')
@@ -618,10 +686,9 @@ if __name__ == "__main__":
                     if result not in ('success',):
                         log.info(f'结果: {result}')
 
-                if CONFIG['use_proxy']:
+                if CONFIG['use_proxy'] and len(pending) % CONFIG['workers'] == 0:
                     log.info(proxy_manager.stats())
 
-                time.sleep(random.uniform(CONFIG['min_interval'], CONFIG['max_interval']))
         except KeyboardInterrupt:
             log.info('已停止')
 

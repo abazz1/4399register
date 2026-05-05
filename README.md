@@ -80,14 +80,13 @@ base64 -w 0 sfz.txt
 | use_custom_model | 使用自定义验证码模型 | true |
 | auto_login | 注册后自动登录获取Sauth | true |
 | use_proxy | 使用代理IP | true |
-| proxy_list_urls | 代理列表地址(逗号分隔) | 5源合并 |
+| proxy_list_urls | 代理列表地址(逗号分隔) | 10源合并 |
 | max_per_ip | 单IP最大注册数(超限自动换IP) | 15 |
-| proxy_check_threads | 代理验证并发线程数 | 50 |
-| proxy_check_timeout | 代理验证超时(秒) | 5 |
-| proxy_check_url | 代理验证地址 | httpbin.org/ip |
+| proxy_check_threads | 代理验证并发线程数 | 100 |
+| proxy_check_timeout | 代理验证超时(秒) | 2 |
+| proxy_warmup | 启动前等待就绪代理数 | 20 |
+| proxy_check_url | 代理验证地址 | ptlogin.4399.com |
 | max_captcha_retry | 验证码最大重试次数 | 3 |
-| min_interval | 每轮最小间隔(秒) | 1 |
-| max_interval | 每轮最大间隔(秒) | 3 |
 
 工作流默认每6小时自动运行一次（cron: `0 */6 * * *`），可在 `.github/workflows/register.yml` 中修改。
 
@@ -169,27 +168,35 @@ USE_PROXY=true WORKERS=5 python auto_register_4399.py --count 20
 | [proxifly/free-proxy-list](https://github.com/proxifly/free-proxy-list) | 5分钟 | `protocols/http/data.txt` |
 | [r00tee/Proxy-List](https://github.com/r00tee/Proxy-List) | 5分钟 | `Https.txt` |
 | [ABoredCat/Free-Proxy](https://github.com/ABoredCat/Free-Proxy) | - | `proxies/http.txt` |
+| [mmpx12/proxy-list](https://github.com/mmpx12/proxy-list) | 每日 | `http.txt` |
+| [ShiftyTR/Proxy-List](https://github.com/ShiftyTR/Proxy-List) | 每日 | `http.txt` |
+| [monosans/proxy-list](https://github.com/monosans/proxy-list) | 每日 | `proxies/http.txt` |
+| [TheSpeedX/PROXY-List](https://github.com/TheSpeedX/PROXY-List) | 每日 | `http.txt` |
+| [proxy.scdn.io](https://proxy.scdn.io) | 实时 | `text.php` |
 
 通过 `proxy_list_urls` 配置，逗号分隔多个地址，支持自定义添加任意源。
 
 代理管理逻辑：
-- 拉取代理后**多线程并发验证**（默认50线程），只保留可用代理
+- 拉取代理后**多线程并发验证**（默认100线程，超时2秒），只保留可用代理
+- 验证URL使用 `ptlogin.4399.com` 接口，确保验证通过的代理真正能访问4399
+- 启动时预热等待20个代理就绪后再开始注册，避免启动阶段线程空等
 - 每个注册线程**独占一个代理IP**，不会多线程共用同一个IP
 - 每个代理IP最多注册 `max_per_ip`（默认15）个账号
 - 达到上限后自动归还并换下一个可用代理
 - 遇到封禁/超频错误**立即丢弃**该代理
-- 网络错误**软失败**：返回池中，连续失败10次才丢弃
+- 网络错误**软失败**：返回池中，连续失败3次才丢弃
+- 换代理重试时采用**指数退避**（1s→2s→4s + 随机抖动），避免打爆目标服务器
 - 代理池耗尽后自动从在线列表拉取+验证新代理
-- 每轮结束后打印代理池状态（就绪/使用中/失效）
 - 不开代理时，直连IP同样受15次限制
 
 相关配置：
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
-| proxy_check_threads | 代理验证并发线程数 | 50 |
-| proxy_check_timeout | 代理验证超时(秒) | 5 |
-| proxy_check_url | 代理验证地址 | httpbin.org/ip |
+| proxy_check_threads | 代理验证并发线程数 | 100 |
+| proxy_check_timeout | 代理验证超时(秒) | 2 |
+| proxy_warmup | 启动前等待就绪代理数 | 20 |
+| proxy_check_url | 代理验证地址 | ptlogin.4399.com |
 
 ## 数据文件格式
 
