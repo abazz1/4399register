@@ -10,6 +10,7 @@ import urllib3
 import threading
 from io import BytesIO
 from PIL import Image
+from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from queue import Queue
 
@@ -216,7 +217,6 @@ class ProxyManager:
         """从需要解析HTML的代理站抓取"""
         existing = self._known_set()
         total_added = 0
-        ip_port_re = re.compile(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})[^\d](\d{2,5})')
 
         def _scrape(name, url, headers=None):
             nonlocal total_added
@@ -237,9 +237,44 @@ class ProxyManager:
             except Exception as e:
                 log.warning(f'  x {name}: {e}')
 
-        for page in range(1, 4):
-            _scrape(f'kuaidaili/p{page}', f'https://www.kuaidaili.com/free/inha/{page}/')
-            time.sleep(0.5)
+        def _scrape_kuaidaili(name, url, headers=None):
+            """快代理专用：解析 tbody 中的 tr/td 元素"""
+            nonlocal total_added
+            try:
+                resp = requests.get(url, headers=headers or {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }, timeout=10, verify=False)
+                if resp.status_code != 200:
+                    log.warning(f'  x {name}: HTTP {resp.status_code}')
+                    return
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                tbody = soup.find('tbody', class_='kdl-table-tbody')
+                if not tbody:
+                    log.warning(f'  x {name}: 未找到代理表格')
+                    return
+                rows = tbody.find_all('tr')
+                proxies = []
+                for row in rows:
+                    cells = row.find_all('td')
+                    if len(cells) >= 2:
+                        ip = cells[0].get_text(strip=True)
+                        port = cells[1].get_text(strip=True)
+                        if ip and port and port.isdigit() and 1 <= int(port) <= 65535:
+                            if ip not in ('0.0.0.0', '127.0.0.1'):
+                                proxies.append(f'{ip}:{port}')
+                added = [p for p in proxies if p not in existing]
+                self._raw.extend(added)
+                existing.update(added)
+                total_added += len(added)
+                log.info(f'  + {name}: {len(added)} 个待验证')
+            except Exception as e:
+                log.warning(f'  x {name}: {e}')
+
+        for page in range(1, 6):
+            _scrape_kuaidaili(f'kuaidaili-inha/p{page}', f'https://www.kuaidaili.com/free/inha/{page}/')
+            time.sleep(1)
+            _scrape_kuaidaili(f'kuaidaili-intr/p{page}', f'https://www.kuaidaili.com/free/intr/{page}/')
+            time.sleep(1)
 
         log.info(f'爬虫抓取完成, 新增 {total_added} 个代理')
 
