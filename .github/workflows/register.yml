@@ -26,11 +26,15 @@ on:
       username_len:
         description: '用户名总长度'
         required: false
-        default: '7'
-      password_len:
-        description: '密码长度'
+        default: '8'
+      password_prefix:
+        description: '密码前缀 (留空=纯随机)'
         required: false
-        default: '10'
+        default: 'HYW_'
+      password_len:
+        description: '密码总长度'
+        required: false
+        default: '12'
       use_custom_model:
         description: '使用自定义验证码模型 (true/false)'
         required: false
@@ -133,8 +137,9 @@ jobs:
           WORKERS: ${{ github.event.inputs.workers || '3' }}
           MAX_SFZ_USES: ${{ github.event.inputs.max_sfz_uses || '4' }}
           USERNAME_PREFIX: ${{ github.event.inputs.username_prefix || '' }}
-          USERNAME_LEN: ${{ github.event.inputs.username_len || '7' }}
-          PASSWORD_LEN: ${{ github.event.inputs.password_len || '10' }}
+          USERNAME_LEN: ${{ github.event.inputs.username_len || '8' }}
+          PASSWORD_PREFIX: ${{ github.event.inputs.password_prefix || '' }}
+          PASSWORD_LEN: ${{ github.event.inputs.password_len || '12' }}
           USE_CUSTOM_MODEL: ${{ github.event.inputs.use_custom_model || 'true' }}
           ONNX_USE: ${{ github.event.inputs.onnx_use || 'true' }}
           USE_PROXY: ${{ github.event.inputs.use_proxy || 'true' }}

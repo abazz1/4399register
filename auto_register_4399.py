@@ -62,8 +62,9 @@ CONFIG = {
     'max_sfz_uses':     env('MAX_SFZ_USES', 4),
     'captcha_length':   env('CAPTCHA_LENGTH', 4),
     'username_prefix':  env('USERNAME_PREFIX', ''),
-    'username_len':     env('USERNAME_LEN', 7),
-    'password_len':     env('PASSWORD_LEN', 10),
+    'username_len':     env('USERNAME_LEN', 8),
+    'password_prefix':  env('PASSWORD_PREFIX', 'HYW_'),
+    'password_len':     env('PASSWORD_LEN', 12),
 
     # 请求
     'captcha_url': 'https://ptlogin.4399.com/ptlogin/captcha.do?captchaId={}',
@@ -91,7 +92,7 @@ CONFIG = {
 ONNX_MODEL_PATH = env('ONNX_MODEL_PATH', 'common.onnx')
 ONNX_CHARSET_PATH = env('ONNX_CHARSET_PATH', 'charset.json')
 
-ALPHABET = 'abcdefghijklmnopqrstuvwxyz1234567890'
+ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890'
 
 ERROR_MAP = {
     '注册成功':     'success',
@@ -610,8 +611,16 @@ def register_4399(username, password, valid_sfz, used_count, proxy_manager):
 def run_once(valid_sfz, used_count, proxy_manager):
     prefix = CONFIG['username_prefix']
     rand_len = CONFIG['username_len'] - len(prefix)
-    username = prefix + ''.join(random.sample(ALPHABET, rand_len))
-    password = ''.join(random.sample(ALPHABET, CONFIG['password_len']))
+    if rand_len <= 0:
+        username = prefix
+    else:
+        username = prefix + ''.join(random.sample(ALPHABET, rand_len))
+    pwd_prefix = CONFIG['password_prefix']
+    pwd_rand_len = CONFIG['password_len'] - len(pwd_prefix)
+    if pwd_rand_len <= 0:
+        password = pwd_prefix
+    else:
+        password = pwd_prefix + ''.join(random.sample(ALPHABET, pwd_rand_len))
     try:
         return register_4399(username, password, valid_sfz, used_count, proxy_manager)
     except Exception as e:
